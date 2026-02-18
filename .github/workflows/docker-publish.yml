@@ -1,97 +1,284 @@
-name: Docker
-
-# This workflow uses actions that are not certified by GitHub.
-# They are provided by a third-party and are governed by
-# separate terms of service, privacy policy, and support
-# documentation.
+name: Build and release
 
 on:
-  push:
-    branches: [ "master" ]
-    # Publish semver tags as releases.
-    tags: [ 'v*.*.*' ]
-  pull_request:
-    branches: [ "master" ]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Version bump type (ignored if force_version is set)'
+        required: false
+        type: choice
+        default: patch
+        options:
+          - patch
+          - minor
+          - major
 
 env:
-  # Use docker.io for Docker Hub if empty
   REGISTRY: ghcr.io
-  # github.repository as <account>/<repo>
-  IMAGE_NAME: ${{ github.repository }}
-
+  IMAGE_DESCRIPTION: Kubernetes mutating webhook for ECR pull-through cache
 
 jobs:
-  build:
-
+  prepare-build:
     runs-on: ubuntu-latest
+
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      name_lower: ${{ steps.repo.outputs.name_lower }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v6
+
+    - name: Generate version
+      id: version
+      run: |
+        BUMP="${{ github.event.inputs.bump }}"
+
+        # Get the latest semver tag
+        LATEST_TAG=$(git tag -l "v[0-9]*.[0-9]*.[0-9]*" | sort -V | tail -n 1)
+
+        if [ -z "$LATEST_TAG" ]; then
+          VERSION="0.1.0"
+        else
+          # Strip leading 'v'
+          CURRENT="${LATEST_TAG#v}"
+          MAJOR=$(echo "$CURRENT" | cut -d. -f1)
+          MINOR=$(echo "$CURRENT" | cut -d. -f2)
+          PATCH=$(echo "$CURRENT" | cut -d. -f3)
+
+          case "$BUMP" in
+            major) VERSION="$((MAJOR + 1)).0.0" ;;
+            minor) VERSION="${MAJOR}.$((MINOR + 1)).0" ;;
+            *)     VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))" ;;
+          esac
+        fi
+
+        echo "Generated version: $VERSION"
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+    - name: Convert repository name to lowercase
+      id: repo
+      run: |
+        REPO_LOWER=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+        echo "Repository name converted to lowercase: $REPO_LOWER"
+        echo "name_lower=$REPO_LOWER" >> $GITHUB_OUTPUT
+
+  build-multiarch-images:
+    needs: prepare-build
+
     permissions:
       contents: read
       packages: write
-      # This is used to complete the identity challenge
-      # with sigstore/fulcio when running outside of PRs.
-      id-token: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+        - linux/amd64
+        - linux/arm64
+
+    runs-on: ${{ matrix.platform == 'linux/amd64' && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+    - name: Checkout repository
+      uses: actions/checkout@v6
 
-      # Install the cosign tool except on PR
-      # https://github.com/sigstore/cosign-installer
-      - name: Install cosign
-        if: github.event_name != 'pull_request'
-        uses: sigstore/cosign-installer@59acb6260d9c0ba8f4a2f9d9b48431a222b68e20 #v3.5.0
-        with:
-          cosign-release: 'v2.2.4'
+    - name: Login to GitHub Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Set up BuildKit Docker container builder to be able to build
-      # multi-platform images and export cache
-      # https://github.com/docker/setup-buildx-action
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@f95db51fddba0c2d1ec667646a06c2ce06100226 # v3.0.0
+    - name: Extract platform architecture
+      run: |
+        echo "PLATFORM_ARCH=${platform##*/}" >> $GITHUB_ENV
+      env:
+        platform: ${{ matrix.platform }}
 
-      # Login against a Docker registry except on PR
-      # https://github.com/docker/login-action
-      - name: Log into registry ${{ env.REGISTRY }}
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@343f7c4344506bcbf9b4de18042ae17996df046d # v3.0.0
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.CR_TOKEN }}
+    - name: Setup Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      with:
+        platforms: ${{ matrix.platform }}
 
-      # Extract metadata (tags, labels) for Docker
-      # https://github.com/docker/metadata-action
-      - name: Extract Docker metadata
-        id: meta
-        uses: docker/metadata-action@96383f45573cb7f253c731d3b3ab81c87ef81934 # v5.0.0
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+    - name: Generate Docker metadata and labels
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ needs.prepare-build.outputs.name_lower }}
+        tags: |
+          type=raw,value=${{ needs.prepare-build.outputs.version }}-${{ env.PLATFORM_ARCH }}
+        labels: |
+          org.opencontainers.image.title=ECR Pull-Through Cache Mutation Webhook
+          org.opencontainers.image.description=${{ env.IMAGE_DESCRIPTION }} (${{ env.PLATFORM_ARCH }})
+          org.opencontainers.image.version=${{ needs.prepare-build.outputs.version }}
+          org.opencontainers.image.vendor=MovieStarPlanet
+          org.opencontainers.image.licenses=MIT
+          org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          org.opencontainers.image.url=https://github.com/${{ github.repository }}
+          org.opencontainers.image.documentation=https://github.com/${{ github.repository }}/blob/main/README.md
+          org.opencontainers.image.created={{ date 'YYYY-MM-DDTHH:mm:ss' tz='UTC' }}
+          org.opencontainers.image.revision=${{ github.sha }}
 
-      # Build and push Docker image with Buildx (don't push on PR)
-      # https://github.com/docker/build-push-action
-      - name: Build and push Docker image
-        id: build-and-push
-        uses: docker/build-push-action@0565240e2d4ab88bba5387d719585280857ece09 # v5.0.0
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+    - name: Build and push platform-specific image
+      id: build
+      uses: docker/build-push-action@v6
+      env:
+        DOCKER_BUILD_SUMMARY: false
+      with:
+        context: .
+        platforms: ${{ matrix.platform }}
+        push: true
+        provenance: false
+        sbom: false
+        tags: ${{ steps.meta.outputs.tags }}
+        annotations: ${{ steps.meta.outputs.annotations }}
+        labels: ${{ steps.meta.outputs.labels }}
+        outputs: type=image,oci-mediatypes=true
 
-      # Sign the resulting Docker image digest except on PRs.
-      # This will only write to the public Rekor transparency log when the Docker
-      # repository is public to avoid leaking data.  If you would like to publish
-      # transparency data even for private images, pass --force to cosign below.
-      # https://github.com/sigstore/cosign
-      - name: Sign the published Docker image
-        if: ${{ github.event_name != 'pull_request' }}
-        env:
-          # https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions#using-an-intermediate-environment-variable
-          TAGS: ${{ steps.meta.outputs.tags }}
-          DIGEST: ${{ steps.build-and-push.outputs.digest }}
-        # This step uses the identity token to provision an ephemeral certificate
-        # against the sigstore community Fulcio instance.
-        run: echo "${TAGS}" | xargs -I {} cosign sign --yes {}@${DIGEST}
+  create-multiarch-manifest:
+    needs:
+    - prepare-build
+    - build-multiarch-images
+
+    permissions:
+      contents: read
+      packages: write
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Login to GitHub Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Generate multiarch manifest metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ needs.prepare-build.outputs.name_lower }}
+        annotations: |
+          type=org.opencontainers.image.description,value=${{ env.IMAGE_DESCRIPTION }}
+        tags: |
+          type=raw,value=${{ needs.prepare-build.outputs.version }}
+          type=raw,value=latest
+
+    - name: Create multiarch manifest and push
+      run: |
+        docker buildx imagetools create \
+          $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+          --annotation='index:org.opencontainers.image.description=${{ env.IMAGE_DESCRIPTION }}' \
+          --annotation='index:org.opencontainers.image.source=https://github.com/${{ github.repository }}' \
+          --annotation='index:org.opencontainers.image.licenses=MIT' \
+          ${{ env.REGISTRY }}/${{ needs.prepare-build.outputs.name_lower }}:${{ needs.prepare-build.outputs.version }}-amd64 \
+          ${{ env.REGISTRY }}/${{ needs.prepare-build.outputs.name_lower }}:${{ needs.prepare-build.outputs.version }}-arm64
+
+    - name: Inspect multiarch manifest
+      run: |
+        docker buildx imagetools inspect '${{ env.REGISTRY }}/${{ needs.prepare-build.outputs.name_lower }}:${{ needs.prepare-build.outputs.version }}'
+
+  publish-github-release:
+    needs:
+    - prepare-build
+    - create-multiarch-manifest
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+    - name: Checkout repository with full history
+      uses: actions/checkout@v6
+
+    - name: Generate release changelog from PRs and commits
+      id: changelog
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        # Get the latest tag (previous version)
+        LATEST_TAG=$(git tag -l --sort=-version:refname | head -n 1)
+
+        # Determine commit range
+        if [ -z "$LATEST_TAG" ]; then
+          echo "No previous tag found, generating changelog from recent activity"
+          COMMIT_RANGE=""
+        else
+          echo "Getting changes since tag: $LATEST_TAG"
+          COMMIT_RANGE="${LATEST_TAG}..HEAD"
+
+          # Check if there are any changes
+          if [ -z "$(git rev-list $COMMIT_RANGE)" ]; then
+            echo "CHANGELOG=No new changes since last release." >> $GITHUB_OUTPUT
+            echo "COMPARISON_URL=https://github.com/${{ github.repository }}/compare/${LATEST_TAG}...v${{ needs.prepare-build.outputs.version }}" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+        fi
+
+        # Get PRs (last 10 merged PRs or PRs since last tag)
+        if [ -z "$COMMIT_RANGE" ]; then
+          PR_LIST=$(gh pr list --state merged --limit 10 --json number,title,url --jq '.[] | "- **PR [#\(.number)](\(.url))**: \(.title)"')
+        else
+          PR_NUMBERS=$(git log $COMMIT_RANGE --oneline --grep="Merge pull request" | grep -o "#[0-9]\+" | sed 's/#//' | sort -u | head -10)
+          PR_LIST=""
+          for pr_num in $PR_NUMBERS; do
+            pr_info=$(gh pr view $pr_num --json number,title,url --jq '"- **PR [#" + (.number|tostring) + "](" + .url + ")**: " + .title' 2>/dev/null || echo "- **PR [#$pr_num]**: PR details not available")
+            PR_LIST="$PR_LIST$pr_info"\n'
+          done
+        fi
+
+        # Get commits (exclude PR merges, last 10)
+        if [ -z "$COMMIT_RANGE" ]; then
+          COMMITS_LIST=$(git log --oneline --grep="Merge pull request" --invert-grep --max-count=10 | sed 's/^[a-f0-9]\+ /- **Commit**: /')
+        else
+          COMMITS_LIST=$(git log $COMMIT_RANGE --oneline --grep="Merge pull request" --invert-grep --max-count=10 | sed 's/^[a-f0-9]\+ /- **Commit**: /')
+        fi
+
+        # Build changelog content
+        CHANGELOG_CONTENT=""
+        [ -n "$PR_LIST" ] && CHANGELOG_CONTENT="#### Pull Requests"\n'"$PR_LIST"
+        [ -n "$COMMITS_LIST" ] && CHANGELOG_CONTENT="${CHANGELOG_CONTENT:+$CHANGELOG_CONTENT\n\n'}#### Commits"\n'"$COMMITS_LIST"
+        [ -z "$CHANGELOG_CONTENT" ] && CHANGELOG_CONTENT="No changes found."
+
+        # Save outputs
+        echo "CHANGELOG<<EOF" >> $GITHUB_OUTPUT
+        echo "$CHANGELOG_CONTENT" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+
+        if [ -n "$LATEST_TAG" ]; then
+          echo "COMPARISON_URL=https://github.com/${{ github.repository }}/compare/${LATEST_TAG}...v${{ needs.prepare-build.outputs.version }}" >> $GITHUB_OUTPUT
+        else
+          echo "COMPARISON_URL=https://github.com/${{ github.repository }}/commits/v${{ needs.prepare-build.outputs.version }}" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: v${{ needs.prepare-build.outputs.version }}
+        name: Release ${{ needs.prepare-build.outputs.version }}
+        body: |
+          ## ${{ env.IMAGE_DESCRIPTION }} v${{ needs.prepare-build.outputs.version }}
+
+          ### Docker Images
+
+          ```bash
+          # Pull the latest version
+          docker pull ${{ env.REGISTRY }}/${{ needs.prepare-build.outputs.name_lower }}:${{ needs.prepare-build.outputs.version }}
+          docker pull ${{ env.REGISTRY }}/${{ needs.prepare-build.outputs.name_lower }}:latest
+          ```
+
+          ### Changes
+
+          ${{ steps.changelog.outputs.CHANGELOG }}
+
+          ---
+
+          **Full Changelog**: ${{ steps.changelog.outputs.COMPARISON_URL }}
+        draft: false
+        prerelease: false
