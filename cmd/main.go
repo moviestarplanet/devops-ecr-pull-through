@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -15,6 +16,30 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+type CertReloader struct {
+	certPath          string
+	keyPath           string
+	cachedCert        *tls.Certificate
+	cachedCertModTime time.Time
+}
+
+func (cr *CertReloader) GetCertificate(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+	stat, err := os.Stat(cr.certPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed checking cert file modification time: %w", err)
+	}
+	if cr.cachedCert == nil || stat.ModTime().After(cr.cachedCertModTime) {
+		pair, err := tls.LoadX509KeyPair(cr.certPath, cr.keyPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed loading tls key pair: %w", err)
+		}
+		cr.cachedCert = &pair
+		cr.cachedCertModTime = stat.ModTime()
+		log.Println("TLS certificate loaded")
+	}
+	return cr.cachedCert, nil
+}
 
 func handleRoot(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "ECR Pull-through webhook %q", html.EscapeString(r.URL.Path))
@@ -200,14 +225,21 @@ func main() {
 	}
 
 	// Check for TLS certificate and key files
-	_, certErr := os.Stat("/etc/webhook/certs/tls.crt")
-	_, keyErr := os.Stat("/etc/webhook/certs/tls.key")
+	certPath := "/etc/webhook/certs/tls.crt"
+	keyPath := "/etc/webhook/certs/tls.key"
+	_, certErr := os.Stat(certPath)
+	_, keyErr := os.Stat(keyPath)
 
 	if os.IsNotExist(certErr) || os.IsNotExist(keyErr) {
 		log.Println("Starting server without TLS...")
 		log.Fatal(s.ListenAndServe())
 	} else {
-		log.Println("Starting server with TLS...")
-		log.Fatal(s.ListenAndServeTLS("/etc/webhook/certs/tls.crt", "/etc/webhook/certs/tls.key"))
+		reloader := &CertReloader{certPath: certPath, keyPath: keyPath}
+		s.TLSConfig = &tls.Config{
+			GetCertificate: reloader.GetCertificate,
+			MinVersion:     tls.VersionTLS12,
+		}
+		log.Println("Starting server with dynamic TLS reloading...")
+		log.Fatal(s.ListenAndServeTLS("", ""))
 	}
 }
