@@ -198,6 +198,7 @@ jobs:
 
     permissions:
       contents: write
+      pull-requests: read
 
     steps:
     - name: Checkout repository with full history
@@ -235,7 +236,7 @@ jobs:
           PR_LIST=""
           for pr_num in $PR_NUMBERS; do
             pr_info=$(gh pr view $pr_num --json number,title,url --jq '"- **PR [#" + (.number|tostring) + "](" + .url + ")**: " + .title' 2>/dev/null || echo "- **PR [#$pr_num]**: PR details not available")
-            PR_LIST="$PR_LIST$pr_info"\n'
+            PR_LIST=$(printf '%s%s\n' "$PR_LIST" "$pr_info")
           done
         fi
 
@@ -248,8 +249,10 @@ jobs:
 
         # Build changelog content
         CHANGELOG_CONTENT=""
-        [ -n "$PR_LIST" ] && CHANGELOG_CONTENT="#### Pull Requests"\n'"$PR_LIST"
-        [ -n "$COMMITS_LIST" ] && CHANGELOG_CONTENT="${CHANGELOG_CONTENT:+$CHANGELOG_CONTENT\n\n'}#### Commits"\n'"$COMMITS_LIST"
+        [ -n "$PR_LIST" ] && CHANGELOG_CONTENT=$(printf '#### Pull Requests\n%s' "$PR_LIST")
+        if [ -n "$COMMITS_LIST" ]; then
+          CHANGELOG_CONTENT=$(printf '%s\n\n#### Commits\n%s' "$CHANGELOG_CONTENT" "$COMMITS_LIST")
+        fi
         [ -z "$CHANGELOG_CONTENT" ] && CHANGELOG_CONTENT="No changes found."
 
         # Save outputs

@@ -4,4 +4,5 @@
 # ... except for dependencies and source
 !go.mod
 !go.sum
+!cmd/
 !cmd/**
