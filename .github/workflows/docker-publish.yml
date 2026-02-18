@@ -101,7 +101,7 @@ jobs:
       with:
         images: ${{ env.REGISTRY }}/${{ needs.prepare-build.outputs.name_lower }}
         tags: |
-          type=raw,value=${{ needs.prepare-build.outputs.version }}-${{ matrix.platform }}
+          type=raw,value=${{ needs.prepare-build.outputs.version }}-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
         labels: |
           org.opencontainers.image.title=ECR Pull-Through Cache Mutation Webhook
           org.opencontainers.image.description=${{ env.IMAGE_DESCRIPTION }} (${{ matrix.platform }})

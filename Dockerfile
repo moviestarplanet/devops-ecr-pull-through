@@ -2,7 +2,8 @@ FROM golang:1.25-alpine
 
 WORKDIR /app
 
-COPY . .
+COPY go.mod go.sum ./
+COPY cmd/ cmd/
 
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
