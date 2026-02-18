@@ -28,6 +28,9 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
+        fetch-tags: true
 
     - name: Generate version
       id: version
