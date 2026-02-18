@@ -14,19 +14,13 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// setupServer prepares config and starts an httptest server with the mutate handler.
-func setupServer() (*httptest.Server, func()) {
-	initGlobals(&Config{
-		Registries:   []string{"ghcr.io", "docker.io"},
-		AwsAccountID: "99999",
-		AwsRegion:    "eu-central-1",
-	})
+// setupHTTPServer prepares config and starts an httptest server with the mutate handler.
+func setupHTTPServer(t *testing.T) *httptest.Server {
+	srv := setupServer(t, "99999", "eu-central-1", "ghcr.io,docker.io")
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/mutate", handleMutate)
-	srv := httptest.NewServer(mux)
-
-	return srv, func() { srv.Close() }
+	mux.HandleFunc("/mutate", srv.handleMutate)
+	return httptest.NewServer(mux)
 }
 
 // doMutate posts the given pod to the test server and returns the parsed patches.
@@ -90,8 +84,8 @@ func findPatchValue(patches []map[string]string, path string) (string, bool) {
 }
 
 func TestMutateHandler_Containers(t *testing.T) {
-	srv, closeFn := setupServer()
-	defer closeFn()
+	ts := setupHTTPServer(t)
+	defer ts.Close()
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "int-pod-c", Namespace: "default"},
@@ -103,7 +97,7 @@ func TestMutateHandler_Containers(t *testing.T) {
 		},
 	}
 
-	patches := doMutate(t, srv.URL, pod)
+	patches := doMutate(t, ts.URL, pod)
 
 	want0 := "99999.dkr.ecr.eu-central-1.amazonaws.com/docker.io/library/nginx:latest"
 	if got, ok := findPatchValue(patches, "/spec/containers/0/image"); !ok {
@@ -121,8 +115,8 @@ func TestMutateHandler_Containers(t *testing.T) {
 }
 
 func TestMutateHandler_InitContainers(t *testing.T) {
-	srv, closeFn := setupServer()
-	defer closeFn()
+	ts := setupHTTPServer(t)
+	defer ts.Close()
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "int-pod-i", Namespace: "default"},
@@ -131,7 +125,7 @@ func TestMutateHandler_InitContainers(t *testing.T) {
 		},
 	}
 
-	patches := doMutate(t, srv.URL, pod)
+	patches := doMutate(t, ts.URL, pod)
 
 	wantInit := "99999.dkr.ecr.eu-central-1.amazonaws.com/docker.io/owner/init:0.1"
 	if got, ok := findPatchValue(patches, "/spec/initContainers/0/image"); !ok {
@@ -142,8 +136,8 @@ func TestMutateHandler_InitContainers(t *testing.T) {
 }
 
 func TestMutateHandler_UnconfiguredRegistryIgnored(t *testing.T) {
-	srv, closeFn := setupServer()
-	defer closeFn()
+	ts := setupHTTPServer(t)
+	defer ts.Close()
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "int-pod-e", Namespace: "default"},
@@ -152,7 +146,7 @@ func TestMutateHandler_UnconfiguredRegistryIgnored(t *testing.T) {
 		},
 	}
 
-	patches := doMutate(t, srv.URL, pod)
+	patches := doMutate(t, ts.URL, pod)
 	if _, ok := findPatchValue(patches, "/spec/ephemeralContainers/0/image"); ok {
 		t.Fatalf("ephemeral patch found but should not be present")
 	}

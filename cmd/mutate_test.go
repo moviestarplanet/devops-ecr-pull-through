@@ -10,12 +10,20 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-func TestActuallyMutate(t *testing.T) {
-	initGlobals(&Config{
-		Registries:   []string{"ghcr.io", "docker.io"},
-		AwsAccountID: "12345",
-		AwsRegion:    "us-west-2",
-	})
+func setupServer(t *testing.T, accountID, region, registries string) *server {
+	t.Helper()
+	t.Setenv("ECR_AWS_ACCOUNT_ID", accountID)
+	t.Setenv("ECR_AWS_REGION", region)
+	t.Setenv("ECR_REGISTRIES", registries)
+	srv, err := newServer()
+	if err != nil {
+		t.Fatalf("newServer: %v", err)
+	}
+	return srv
+}
+
+func TestMutate(t *testing.T) {
+	srv := setupServer(t, "12345", "us-west-2", "ghcr.io,docker.io")
 
 	t.Run("containers", func(t *testing.T) {
 		pod := &corev1.Pod{
@@ -27,7 +35,7 @@ func TestActuallyMutate(t *testing.T) {
 				},
 			},
 		}
-		checkMutatePatch(t, pod, map[string]string{
+		checkMutatePatch(t, srv, pod, map[string]string{
 			"/spec/containers/0/image": "12345.dkr.ecr.us-west-2.amazonaws.com/docker.io/library/nginx",
 			"/spec/containers/1/image": "12345.dkr.ecr.us-west-2.amazonaws.com/ghcr.io/owner/image:tag",
 		})
@@ -42,17 +50,13 @@ func TestActuallyMutate(t *testing.T) {
 				},
 			},
 		}
-		checkMutatePatch(t, pod, map[string]string{
+		checkMutatePatch(t, srv, pod, map[string]string{
 			"/spec/initContainers/0/image": "12345.dkr.ecr.us-west-2.amazonaws.com/docker.io/owner/init:1.0",
 		})
 	})
 
 	t.Run("cross-region ECR rewrite", func(t *testing.T) {
-		initGlobals(&Config{
-			Registries:   []string{"12345.dkr.ecr.eu-west-1.amazonaws.com"},
-			AwsAccountID: "12345",
-			AwsRegion:    "us-east-1",
-		})
+		srv := setupServer(t, "12345", "us-east-1", "12345.dkr.ecr.eu-west-1.amazonaws.com")
 		pod := &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Namespace: "default"},
 			Spec: corev1.PodSpec{
@@ -62,18 +66,14 @@ func TestActuallyMutate(t *testing.T) {
 				},
 			},
 		}
-		checkMutatePatch(t, pod, map[string]string{
+		checkMutatePatch(t, srv, pod, map[string]string{
 			"/spec/containers/0/image": "12345.dkr.ecr.us-east-1.amazonaws.com/prefix/image:tag",
 			"/spec/containers/1/image": "12345.dkr.ecr.us-east-1.amazonaws.com/imagewithoutprefix:tag",
 		})
 	})
 
 	t.Run("cross-account ECR rewrite", func(t *testing.T) {
-		initGlobals(&Config{
-			Registries:   []string{"99999.dkr.ecr.eu-west-1.amazonaws.com"},
-			AwsAccountID: "12345",
-			AwsRegion:    "us-east-1",
-		})
+		srv := setupServer(t, "12345", "us-east-1", "99999.dkr.ecr.eu-west-1.amazonaws.com")
 		pod := &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Namespace: "default"},
 			Spec: corev1.PodSpec{
@@ -82,17 +82,13 @@ func TestActuallyMutate(t *testing.T) {
 				},
 			},
 		}
-		checkMutatePatch(t, pod, map[string]string{
+		checkMutatePatch(t, srv, pod, map[string]string{
 			"/spec/containers/0/image": "12345.dkr.ecr.us-east-1.amazonaws.com/org/image:tag",
 		})
 	})
 
 	t.Run("same-region ECR image not patched", func(t *testing.T) {
-		initGlobals(&Config{
-			Registries:   []string{"12345.dkr.ecr.eu-west-1.amazonaws.com"},
-			AwsAccountID: "12345",
-			AwsRegion:    "us-east-1",
-		})
+		srv := setupServer(t, "12345", "us-east-1", "12345.dkr.ecr.eu-west-1.amazonaws.com")
 		pod := &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Namespace: "default"},
 			Spec: corev1.PodSpec{
@@ -101,15 +97,11 @@ func TestActuallyMutate(t *testing.T) {
 				},
 			},
 		}
-		checkMutatePatch(t, pod, map[string]string{}) // already in target region, no patch
+		checkMutatePatch(t, srv, pod, map[string]string{}) // already in target region, no patch
 	})
 
 	t.Run("third-party ECR account not rewritten", func(t *testing.T) {
-		initGlobals(&Config{
-			Registries:   []string{"12345.dkr.ecr.eu-west-1.amazonaws.com"},
-			AwsAccountID: "12345",
-			AwsRegion:    "us-east-1",
-		})
+		srv := setupServer(t, "12345", "us-east-1", "12345.dkr.ecr.eu-west-1.amazonaws.com")
 		pod := &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Namespace: "default"},
 			Spec: corev1.PodSpec{
@@ -118,15 +110,11 @@ func TestActuallyMutate(t *testing.T) {
 				},
 			},
 		}
-		checkMutatePatch(t, pod, map[string]string{}) // expect no patch
+		checkMutatePatch(t, srv, pod, map[string]string{}) // expect no patch
 	})
 
 	t.Run("docker.io images get library normalised", func(t *testing.T) {
-		initGlobals(&Config{
-			Registries:   []string{"docker.io"},
-			AwsAccountID: "12345",
-			AwsRegion:    "us-west-2",
-		})
+		srv := setupServer(t, "12345", "us-west-2", "docker.io")
 		pod := &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Namespace: "default"},
 			Spec: corev1.PodSpec{
@@ -137,7 +125,7 @@ func TestActuallyMutate(t *testing.T) {
 				},
 			},
 		}
-		checkMutatePatch(t, pod, map[string]string{
+		checkMutatePatch(t, srv, pod, map[string]string{
 			"/spec/containers/0/image": "12345.dkr.ecr.us-west-2.amazonaws.com/docker.io/library/nginx",
 			"/spec/containers/1/image": "12345.dkr.ecr.us-west-2.amazonaws.com/docker.io/library/nginx",
 			"/spec/containers/2/image": "12345.dkr.ecr.us-west-2.amazonaws.com/docker.io/library/nginx",
@@ -145,11 +133,7 @@ func TestActuallyMutate(t *testing.T) {
 	})
 
 	t.Run("image already at ecrRegistryHostname is not re-prefixed", func(t *testing.T) {
-		initGlobals(&Config{
-			Registries:   []string{"12345.dkr.ecr.us-east-1.amazonaws.com"},
-			AwsAccountID: "12345",
-			AwsRegion:    "us-east-1",
-		})
+		srv := setupServer(t, "12345", "us-east-1", "12345.dkr.ecr.us-east-1.amazonaws.com")
 		pod := &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Namespace: "default"},
 			Spec: corev1.PodSpec{
@@ -158,7 +142,7 @@ func TestActuallyMutate(t *testing.T) {
 				},
 			},
 		}
-		checkMutatePatch(t, pod, map[string]string{}) // already at ecrRegistryHostname, must not double-prefix
+		checkMutatePatch(t, srv, pod, map[string]string{}) // already at ecrRegistryHostname, must not double-prefix
 	})
 
 	t.Run("unconfigured registry not patched", func(t *testing.T) {
@@ -170,11 +154,79 @@ func TestActuallyMutate(t *testing.T) {
 				},
 			},
 		}
-		checkMutatePatch(t, pod, map[string]string{}) // quay.io not in registry list
+		checkMutatePatch(t, srv, pod, map[string]string{}) // quay.io not in registry list
 	})
 }
 
-func checkMutatePatch(t *testing.T, pod *corev1.Pod, want map[string]string) {
+func TestRewriteImage(t *testing.T) {
+	srv := setupServer(t, "12345", "us-west-2", "ghcr.io,docker.io,public.ecr.aws")
+
+	tests := []struct {
+		name  string
+		image string
+		want  string
+		ok    bool
+	}{
+		// Docker Hub normalization
+		{"bare image", "nginx", "12345.dkr.ecr.us-west-2.amazonaws.com/docker.io/library/nginx", true},
+		{"bare image with tag", "nginx:1.25", "12345.dkr.ecr.us-west-2.amazonaws.com/docker.io/library/nginx:1.25", true},
+		{"implicit docker hub", "owner/image", "12345.dkr.ecr.us-west-2.amazonaws.com/docker.io/owner/image", true},
+		{"explicit docker.io short", "docker.io/nginx", "12345.dkr.ecr.us-west-2.amazonaws.com/docker.io/library/nginx", true},
+		{"explicit docker.io with library", "docker.io/library/nginx", "12345.dkr.ecr.us-west-2.amazonaws.com/docker.io/library/nginx", true},
+		{"explicit docker.io with owner", "docker.io/owner/image:1.2", "12345.dkr.ecr.us-west-2.amazonaws.com/docker.io/owner/image:1.2", true},
+		{"docker.io with digest", "docker.io/nginx@sha256:abc", "12345.dkr.ecr.us-west-2.amazonaws.com/docker.io/library/nginx@sha256:abc", true},
+		{"implicit docker hub nested", "a/b/c:tag", "12345.dkr.ecr.us-west-2.amazonaws.com/docker.io/a/b/c:tag", true},
+
+		// Other configured registries
+		{"ghcr.io image", "ghcr.io/owner/image:tag", "12345.dkr.ecr.us-west-2.amazonaws.com/ghcr.io/owner/image:tag", true},
+		{"public.ecr.aws image", "public.ecr.aws/karpenter/controller:1.8.6", "12345.dkr.ecr.us-west-2.amazonaws.com/public.ecr.aws/karpenter/controller:1.8.6", true},
+		{"public.ecr.aws with digest", "public.ecr.aws/karpenter/controller:1.8.6@sha256:dfbaa02d5fad", "12345.dkr.ecr.us-west-2.amazonaws.com/public.ecr.aws/karpenter/controller:1.8.6@sha256:dfbaa02d5fad", true},
+
+		// Unconfigured registry
+		{"quay.io not configured", "quay.io/org/repo:tag", "", false},
+		{"random registry", "registry.example.com/org/image:tag", "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := srv.rewriteImage(tt.image)
+			if ok != tt.ok {
+				t.Fatalf("rewriteImage(%q) ok = %v, want %v", tt.image, ok, tt.ok)
+			}
+			if got != tt.want {
+				t.Fatalf("rewriteImage(%q) = %q, want %q", tt.image, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRewriteImage_ECR(t *testing.T) {
+	srv := setupServer(t, "12345", "us-east-1", "99999.dkr.ecr.eu-west-1.amazonaws.com")
+
+	tests := []struct {
+		name  string
+		image string
+		want  string
+		ok    bool
+	}{
+		{"cross-account rewrite", "99999.dkr.ecr.eu-west-1.amazonaws.com/org/image:tag", "12345.dkr.ecr.us-east-1.amazonaws.com/org/image:tag", true},
+		{"different ECR not configured", "88888.dkr.ecr.eu-west-1.amazonaws.com/image:tag", "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := srv.rewriteImage(tt.image)
+			if ok != tt.ok {
+				t.Fatalf("rewriteImage(%q) ok = %v, want %v", tt.image, ok, tt.ok)
+			}
+			if got != tt.want {
+				t.Fatalf("rewriteImage(%q) = %q, want %q", tt.image, got, tt.want)
+			}
+		})
+	}
+}
+
+func checkMutatePatch(t *testing.T, srv *server, pod *corev1.Pod, want map[string]string) {
 	t.Helper()
 	podJSON, err := json.Marshal(pod)
 	if err != nil {
@@ -189,9 +241,9 @@ func checkMutatePatch(t *testing.T, pod *corev1.Pod, want map[string]string) {
 	if err != nil {
 		t.Fatalf("marshal admissionreview: %v", err)
 	}
-	mutated, err := actuallyMutate(body)
+	mutated, err := srv.mutate(body)
 	if err != nil {
-		t.Fatalf("actuallyMutate error: %v", err)
+		t.Fatalf("mutate error: %v", err)
 	}
 	out := v1beta1.AdmissionReview{}
 	if err := json.Unmarshal(mutated, &out); err != nil {
@@ -221,35 +273,5 @@ func checkMutatePatch(t *testing.T, pod *corev1.Pod, want map[string]string) {
 		if _, ok := want[k]; !ok {
 			t.Errorf("unexpected patch for %s", k)
 		}
-	}
-}
-
-func TestNormalizeDockerHubImage(t *testing.T) {
-	tests := []struct {
-		name string
-		want string
-	}{
-		{"nginx", "docker.io/library/nginx"},
-		{"image:1.2.3", "docker.io/library/image:1.2.3"},
-		{"owner/image", "docker.io/owner/image"},
-		{"owner/image:tag", "docker.io/owner/image:tag"},
-		{"docker.io/nginx@sha256:abc", "docker.io/library/nginx@sha256:abc"},
-		{"docker.io/library/nginx", "docker.io/library/nginx"},
-		{"docker.io/owner/image:1.2", "docker.io/owner/image:1.2"},
-		{"a/b/c:tag", "docker.io/a/b/c:tag"},
-
-		// non-docker registries -> returned unchanged
-		{"ghcr.io/owner/image:tag", "ghcr.io/owner/image:tag"},
-		{"quay.io/org/repo", "quay.io/org/repo"},
-		{"registry.example.com/org/image:tag", "registry.example.com/org/image:tag"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := normalizeDockerHubImage(tt.name)
-			if got != tt.want {
-				t.Fatalf("normalizeDockerHubImage(%q) = %q, want %q", tt.name, got, tt.want)
-			}
-		})
 	}
 }

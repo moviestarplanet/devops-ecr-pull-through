@@ -66,17 +66,18 @@ spec:
               scheme: HTTPS
             initialDelaySeconds: 5
             periodSeconds: 10
+          env:
+            - name: ECR_AWS_ACCOUNT_ID
+              value: {{ required "awsAccountId is required" .Values.awsAccountId | quote }}
+            - name: ECR_AWS_REGION
+              value: {{ required "awsRegion is required" .Values.awsRegion | quote }}
+            - name: ECR_REGISTRIES
+              value: {{ .Values.registries | join "," | quote }}
           volumeMounts:
-            - name: config
-              mountPath: /etc/ecr-pull-through
-              readOnly: true
             - name: certs
               mountPath: /etc/webhook/certs
               readOnly: true
       volumes:
-        - name: config
-          configMap:
-            name: {{ include "ecr-pull-through.fullname" . }}
         - name: certs
           secret:
             secretName: {{ include "ecr-pull-through.fullname" . }}-tls

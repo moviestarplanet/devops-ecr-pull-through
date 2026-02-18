@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -18,11 +19,48 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+const dockerHubRegistry = "docker.io/"
+
+type server struct {
+	registries          []string
+	ecrRegistryHostname string
+}
+
 type CertReloader struct {
 	certPath          string
 	keyPath           string
 	cachedCert        *tls.Certificate
 	cachedCertModTime time.Time
+}
+
+func newServer() (*server, error) {
+	accountID := os.Getenv("ECR_AWS_ACCOUNT_ID")
+	if accountID == "" {
+		return nil, fmt.Errorf("ECR_AWS_ACCOUNT_ID is required")
+	}
+
+	region := os.Getenv("ECR_AWS_REGION")
+	if region == "" {
+		return nil, fmt.Errorf("ECR_AWS_REGION is required")
+	}
+
+	var registries []string
+	if raw := os.Getenv("ECR_REGISTRIES"); raw != "" {
+		for r := range strings.SplitSeq(raw, ",") {
+			r = strings.TrimSpace(r)
+			if r != "" {
+				registries = append(registries, strings.TrimRight(r, "/")+"/")
+			}
+		}
+	}
+	if len(registries) == 0 {
+		registries = []string{dockerHubRegistry}
+	}
+
+	return &server{
+		registries:          registries,
+		ecrRegistryHostname: fmt.Sprintf("%s.dkr.ecr.%s.amazonaws.com/", accountID, region),
+	}, nil
 }
 
 func (cr *CertReloader) GetCertificate(*tls.ClientHelloInfo) (*tls.Certificate, error) {
@@ -46,62 +84,44 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "ECR Pull-through webhook %q", html.EscapeString(r.URL.Path))
 }
 
-var config *Config
-var ecrRegistryHostname string
-
-func initGlobals(c *Config) {
-	for i, reg := range c.Registries {
-		c.Registries[i] = strings.TrimRight(reg, "/") + "/"
-	}
-	config = c
-	ecrRegistryHostname = fmt.Sprintf("%s.dkr.ecr.%s.amazonaws.com/", c.AwsAccountID, c.AwsRegion)
-}
-
 // isEcrRegistry reports whether the given registry hostname belongs to an ECR endpoint.
 func isEcrRegistry(registry string) bool {
 	return strings.Contains(registry, ".dkr.ecr.")
 }
 
-// normalizeDockerHubImage ensures Docker Hub images have an explicit
-// docker.io/library/ or docker.io/ prefix. Non-Docker-Hub images are
-// returned unchanged.
-func normalizeDockerHubImage(image string) string {
-	host, path, hasSlash := strings.Cut(image, "/")
-	if !hasSlash {
-		return "docker.io/library/" + image
-	}
-	if strings.Contains(host, ".") || strings.Contains(host, ":") {
-		if host != "docker.io" {
-			return image
+// rewriteImage normalizes the image, checks whether its registry is in the
+// configured list, and returns the pull-through cache path. Returns ("", false)
+// when the image's registry is not configured.
+func (s *server) rewriteImage(image string) (string, bool) {
+	var registry, path string
+	i := strings.IndexByte(image, '/') + 1
+	if i == 0 {
+		// bare image: "nginx" → docker.io/, library/nginx
+		registry = dockerHubRegistry
+		path = "library/" + image
+	} else {
+		registry = image[:i]
+		path = image[i:]
+		if !strings.Contains(registry, ".") && !strings.Contains(registry, ":") {
+			// no registry specified, implicit Docker Hub: "owner/image" → docker.io/, owner/image
+			registry = dockerHubRegistry
+			path = image
+		} else if registry == dockerHubRegistry && !strings.Contains(path, "/") {
+			// docker.io/nginx → docker.io/, library/nginx
+			path = "library/" + path
 		}
-		if !strings.Contains(path, "/") {
-			// docker.io/nginx -> docker.io/library/nginx
-			return "docker.io/library/" + path
-		}
-		return image
 	}
-	// No registry specified -> Docker Hub implicit
-	return "docker.io/" + image
-}
 
-// rewriteImage normalizes the image, checks whether it belongs to the given
-// registry, and returns the pull-through cache path. Returns ("", false) when
-// the image does not match the registry.
-func rewriteImage(image, registry string) (string, bool) {
-	normalized := image
-	if registry == "docker.io/" {
-		normalized = normalizeDockerHubImage(image)
-	}
-	if !strings.HasPrefix(normalized, registry) {
+	if !slices.Contains(s.registries, registry) {
 		return "", false
 	}
 	if isEcrRegistry(registry) {
-		return ecrRegistryHostname + normalized[strings.Index(normalized, "/")+1:], true
+		return s.ecrRegistryHostname + path, true
 	}
-	return ecrRegistryHostname + normalized, true
+	return s.ecrRegistryHostname + registry + path, true
 }
 
-func handleMutate(w http.ResponseWriter, r *http.Request) {
+func (s *server) handleMutate(w http.ResponseWriter, r *http.Request) {
 
 	// read the body / request
 	body, err := io.ReadAll(r.Body)
@@ -113,7 +133,7 @@ func handleMutate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// mutate the request
-	mutated, err := actuallyMutate(body)
+	mutated, err := s.mutate(body)
 	if err != nil {
 		slog.Error("failed to mutate request", "error", err)
 		w.WriteHeader(http.StatusInternalServerError)
@@ -125,7 +145,7 @@ func handleMutate(w http.ResponseWriter, r *http.Request) {
 	w.Write(mutated)
 }
 
-func actuallyMutate(body []byte) ([]byte, error) {
+func (s *server) mutate(body []byte) ([]byte, error) {
 	// unmarshal request into AdmissionReview struct
 	admReview := v1beta1.AdmissionReview{}
 	if err := json.Unmarshal(body, &admReview); err != nil {
@@ -157,15 +177,12 @@ func actuallyMutate(body []byte) ([]byte, error) {
 		p := []map[string]string{}
 
 		addPatchForImage := func(image, path string) {
-			if strings.HasPrefix(image, ecrRegistryHostname) {
+			if strings.HasPrefix(image, s.ecrRegistryHostname) {
 				return
 			}
-			for _, reg := range config.RegistryList() {
-				if newImage, ok := rewriteImage(image, reg); ok {
-					p = append(p, map[string]string{"op": "replace", "path": path, "value": newImage})
-					slog.Info("patched image", "namespace", pod.Namespace, "pod", pod.ObjectMeta.GenerateName, "original", image, "new", newImage)
-					return
-				}
+			if newImage, ok := s.rewriteImage(image); ok {
+				p = append(p, map[string]string{"op": "replace", "path": path, "value": newImage})
+				slog.Info("patched image", "namespace", pod.Namespace, "pod", pod.ObjectMeta.GenerateName, "original", image, "new", newImage)
 			}
 		}
 
@@ -207,18 +224,16 @@ func actuallyMutate(body []byte) ([]byte, error) {
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 
-	var err error
-	config, err = ReadConf("/etc/ecr-pull-through/registries.yaml")
+	srv, err := newServer()
 	if err != nil {
-		slog.Error("failed to read config", "error", err)
+		slog.Error("failed to load config", "error", err)
 		os.Exit(1)
 	}
-	initGlobals(config)
 
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/", handleRoot)
-	mux.HandleFunc("/mutate", handleMutate)
+	mux.HandleFunc("/mutate", srv.handleMutate)
 
 	s := &http.Server{
 		Addr:           ":8443",
