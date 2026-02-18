@@ -194,7 +194,7 @@ jobs:
     - prepare-build
     - create-multiarch-manifest
 
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
 
     permissions:
       contents: write
@@ -264,27 +264,31 @@ jobs:
         fi
 
     - name: Create GitHub Release
-      uses: softprops/action-gh-release@v2
-      with:
-        tag_name: v${{ needs.prepare-build.outputs.version }}
-        name: Release ${{ needs.prepare-build.outputs.version }}
-        body: |
-          ## ${{ env.IMAGE_DESCRIPTION }} v${{ needs.prepare-build.outputs.version }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        VERSION: ${{ needs.prepare-build.outputs.version }}
+        IMAGE: ${{ env.REGISTRY }}/${{ needs.prepare-build.outputs.name_lower }}
+        CHANGELOG: ${{ steps.changelog.outputs.CHANGELOG }}
+        COMPARISON_URL: ${{ steps.changelog.outputs.COMPARISON_URL }}
+      run: |
+        gh release create "v${VERSION}" \
+          --title "Release ${VERSION}" \
+          --notes "$(cat <<EOF
+        ## ${IMAGE_DESCRIPTION} v${VERSION}
 
-          ### Docker Images
+        ### Docker Images
 
-          ```bash
-          # Pull the latest version
-          docker pull ${{ env.REGISTRY }}/${{ needs.prepare-build.outputs.name_lower }}:${{ needs.prepare-build.outputs.version }}
-          docker pull ${{ env.REGISTRY }}/${{ needs.prepare-build.outputs.name_lower }}:latest
-          ```
+        \`\`\`bash
+        docker pull ${IMAGE}:${VERSION}
+        docker pull ${IMAGE}:latest
+        \`\`\`
 
-          ### Changes
+        ### Changes
 
-          ${{ steps.changelog.outputs.CHANGELOG }}
+        ${CHANGELOG}
 
-          ---
+        ---
 
-          **Full Changelog**: ${{ steps.changelog.outputs.COMPARISON_URL }}
-        draft: false
-        prerelease: false
+        **Full Changelog**: ${COMPARISON_URL}
+        EOF
+        )"
