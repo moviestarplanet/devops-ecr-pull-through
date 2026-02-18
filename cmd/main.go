@@ -21,6 +21,59 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
 }
 
 var config *Config
+var ecrRegistryHostname string
+
+func initGlobals(c *Config) {
+	for i, reg := range c.Registries {
+		c.Registries[i] = strings.TrimRight(reg, "/") + "/"
+	}
+	config = c
+	ecrRegistryHostname = fmt.Sprintf("%s.dkr.ecr.%s.amazonaws.com/", c.AwsAccountID, c.AwsRegion)
+}
+
+// isEcrRegistry reports whether the given registry hostname belongs to an ECR endpoint.
+func isEcrRegistry(registry string) bool {
+	return strings.Contains(registry, ".dkr.ecr.")
+}
+
+// normalizeDockerHubImage ensures Docker Hub images have an explicit
+// docker.io/library/ or docker.io/ prefix. Non-Docker-Hub images are
+// returned unchanged.
+func normalizeDockerHubImage(image string) string {
+	host, path, hasSlash := strings.Cut(image, "/")
+	if !hasSlash {
+		return "docker.io/library/" + image
+	}
+	if strings.Contains(host, ".") || strings.Contains(host, ":") {
+		if host != "docker.io" {
+			return image
+		}
+		if !strings.Contains(path, "/") {
+			// docker.io/nginx -> docker.io/library/nginx
+			return "docker.io/library/" + path
+		}
+		return image
+	}
+	// No registry specified -> Docker Hub implicit
+	return "docker.io/" + image
+}
+
+// rewriteImage normalizes the image, checks whether it belongs to the given
+// registry, and returns the pull-through cache path. Returns ("", false) when
+// the image does not match the registry.
+func rewriteImage(image, registry string) (string, bool) {
+	normalized := image
+	if registry == "docker.io/" {
+		normalized = normalizeDockerHubImage(image)
+	}
+	if !strings.HasPrefix(normalized, registry) {
+		return "", false
+	}
+	if isEcrRegistry(registry) {
+		return ecrRegistryHostname + normalized[strings.Index(normalized, "/")+1:], true
+	}
+	return ecrRegistryHostname + normalized, true
+}
 
 func handleMutate(w http.ResponseWriter, r *http.Request) {
 
@@ -44,17 +97,6 @@ func handleMutate(w http.ResponseWriter, r *http.Request) {
 	// and write it back
 	w.WriteHeader(http.StatusOK)
 	w.Write(mutated)
-}
-
-// Helper function to process Docker Hub official images
-func isDockerHubOfficialImage(image string) bool {
-	// Handle both "nginx" and "docker.io/nginx" format
-	if !strings.Contains(image, "/") {
-		return true
-	}
-	// Handle "docker.io/library/nginx" or "docker.io/nginx" format
-	parts := strings.Split(image, "/")
-	return len(parts) <= 3 && parts[0] == "docker.io" && (len(parts) == 2 || parts[1] == "library")
 }
 
 func actuallyMutate(body []byte) ([]byte, error) {
@@ -87,110 +129,31 @@ func actuallyMutate(body []byte) ([]byte, error) {
 		// the actual mutation is done by a string in JSONPatch style, i.e. we don't _actually_ modify the object, but
 		// tell K8S how it should modifiy it
 		p := []map[string]string{}
+
+		addPatchForImage := func(image, path string) {
+			if strings.HasPrefix(image, ecrRegistryHostname) {
+				return
+			}
+			for _, reg := range config.RegistryList() {
+				if newImage, ok := rewriteImage(image, reg); ok {
+					p = append(p, map[string]string{"op": "replace", "path": path, "value": newImage})
+					log.Printf("Created patch for image %s on pod %s:%s, with %s", image, pod.Namespace, pod.ObjectMeta.GenerateName, newImage)
+					return
+				}
+			}
+		}
+
 		// Containers
 		for i, container := range pod.Spec.Containers {
-			imageReplaced := false
-			for _, reg := range config.RegistryList() {
-				if strings.HasPrefix(container.Image, reg) {
-					newImage := fmt.Sprintf("%s.dkr.ecr.%s.amazonaws.com/%s", config.AwsAccountID, config.AwsRegion, container.Image)
-					patch := map[string]string{
-						"op":    "replace",
-						"path":  fmt.Sprintf("/spec/containers/%d/image", i),
-						"value": newImage,
-					}
-					p = append(p, patch)
-					imageReplaced = true
-					log.Printf("Created patch for container image %s on pod %s:%s, with %s", container.Image, pod.Namespace, pod.ObjectMeta.GenerateName, newImage)
-					break // Stop checking other registries if a match is found
-				}
-			}
-
-			// Check if image is a Docker Hub official image
-			if !imageReplaced && isDockerHubOfficialImage(container.Image) {
-				for _, reg := range config.RegistryList() {
-					if reg == "docker.io" {
-						newImage := fmt.Sprintf("%s.dkr.ecr.%s.amazonaws.com/docker.io/library/%s", config.AwsAccountID, config.AwsRegion, container.Image)
-						patch := map[string]string{
-							"op":    "replace",
-							"path":  fmt.Sprintf("/spec/containers/%d/image", i),
-							"value": newImage,
-						}
-						p = append(p, patch)
-						log.Printf("Created patch for container image %s on pod %s:%s, with %s", container.Image, pod.Namespace, pod.ObjectMeta.GenerateName, newImage)
-						break
-					}
-				}
-			}
+			addPatchForImage(container.Image, fmt.Sprintf("/spec/containers/%d/image", i))
 		}
 		// InitContainers
 		for i, initcontainer := range pod.Spec.InitContainers {
-			imageReplaced := false
-			for _, reg := range config.RegistryList() {
-				if strings.HasPrefix(initcontainer.Image, reg) {
-					newImage := fmt.Sprintf("%s.dkr.ecr.%s.amazonaws.com/%s", config.AwsAccountID, config.AwsRegion, initcontainer.Image)
-					patch := map[string]string{
-						"op":    "replace",
-						"path":  fmt.Sprintf("/spec/initContainers/%d/image", i),
-						"value": newImage,
-					}
-					p = append(p, patch)
-					imageReplaced = true
-					log.Printf("Created patch for initcontainer image %s on pod %s:%s, with %s", initcontainer.Image, pod.Namespace, pod.ObjectMeta.GenerateName, newImage)
-					break // Stop checking other registries if a match is found
-				}
-			}
-
-			// Check if image is a Docker Hub official image
-			if !imageReplaced && isDockerHubOfficialImage(initcontainer.Image) {
-				for _, reg := range config.RegistryList() {
-					if reg == "docker.io" {
-						newImage := fmt.Sprintf("%s.dkr.ecr.%s.amazonaws.com/docker.io/library/%s", config.AwsAccountID, config.AwsRegion, initcontainer.Image)
-						patch := map[string]string{
-							"op":    "replace",
-							"path":  fmt.Sprintf("/spec/initContainers/%d/image", i),
-							"value": newImage,
-						}
-						p = append(p, patch)
-						log.Printf("Created patch for initcontainer image %s on pod %s:%s, with %s", initcontainer.Image, pod.Namespace, pod.ObjectMeta.GenerateName, newImage)
-						break
-					}
-				}
-			}
+			addPatchForImage(initcontainer.Image, fmt.Sprintf("/spec/initContainers/%d/image", i))
 		}
 		// EphemeralContainers
 		for i, ephemeralcontainer := range pod.Spec.EphemeralContainers {
-			imageReplaced := false
-			for _, reg := range config.RegistryList() {
-				if strings.HasPrefix(ephemeralcontainer.Image, reg) {
-					newImage := fmt.Sprintf("%s.dkr.ecr.%s.amazonaws.com/%s", config.AwsAccountID, config.AwsRegion, ephemeralcontainer.Image)
-					patch := map[string]string{
-						"op":    "replace",
-						"path":  fmt.Sprintf("/spec/ephemeralContainers/%d/image", i),
-						"value": newImage,
-					}
-					p = append(p, patch)
-					imageReplaced = true
-					log.Printf("Created patch for ephemeralcontainer image %s on pod %s:%s, with %s", ephemeralcontainer.Image, pod.Namespace, pod.ObjectMeta.GenerateName, newImage)
-					break // Stop checking other registries if a match is found
-				}
-			}
-
-			// Check if image is a Docker Hub official image
-			if !imageReplaced && isDockerHubOfficialImage(ephemeralcontainer.Image) {
-				for _, reg := range config.RegistryList() {
-					if reg == "docker.io" {
-						newImage := fmt.Sprintf("%s.dkr.ecr.%s.amazonaws.com/docker.io/library/%s", config.AwsAccountID, config.AwsRegion, ephemeralcontainer.Image)
-						patch := map[string]string{
-							"op":    "replace",
-							"path":  fmt.Sprintf("/spec/ephemeralContainers/%d/image", i),
-							"value": newImage,
-						}
-						p = append(p, patch)
-						log.Printf("Created patch for ephemeralcontainer image %s on pod %s:%s, with %s", ephemeralcontainer.Image, pod.Namespace, pod.ObjectMeta.GenerateName, newImage)
-						break
-					}
-				}
-			}
+			addPatchForImage(ephemeralcontainer.Image, fmt.Sprintf("/spec/ephemeralContainers/%d/image", i))
 		}
 
 		// parse the []map into JSON
@@ -221,6 +184,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to read config: %v", err)
 	}
+	initGlobals(config)
 
 	mux := http.NewServeMux()
 

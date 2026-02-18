@@ -30,7 +30,7 @@ func ReadConf(filename string) (*Config, error) {
 
 func (c *Config) RegistryList() []string {
 	if len(c.Registries) == 0 {
-		return []string{"docker.io"}
+		return []string{"docker.io/"}
 	}
 	return c.Registries
 }
