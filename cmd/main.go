@@ -7,6 +7,7 @@ import (
 	"html"
 	"io"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -36,7 +37,7 @@ func (cr *CertReloader) GetCertificate(*tls.ClientHelloInfo) (*tls.Certificate, 
 		}
 		cr.cachedCert = &pair
 		cr.cachedCertModTime = stat.ModTime()
-		log.Println("TLS certificate loaded")
+		slog.Info("TLS certificate loaded")
 	}
 	return cr.cachedCert, nil
 }
@@ -106,7 +107,7 @@ func handleMutate(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	defer r.Body.Close()
 	if err != nil {
-		log.Println(err)
+		slog.Error("failed to read request body", "error", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		fmt.Fprintf(w, "%s", err)
 	}
@@ -114,7 +115,7 @@ func handleMutate(w http.ResponseWriter, r *http.Request) {
 	// mutate the request
 	mutated, err := actuallyMutate(body)
 	if err != nil {
-		log.Println(err)
+		slog.Error("failed to mutate request", "error", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		fmt.Fprintf(w, "%s", err)
 	}
@@ -144,7 +145,7 @@ func actuallyMutate(body []byte) ([]byte, error) {
 		if err := json.Unmarshal(ar.Object.Raw, &pod); err != nil {
 			return nil, fmt.Errorf("unable unmarshal pod json object %v", err)
 		}
-		log.Printf("Received request to mutate pod %s:%s", pod.Namespace, pod.ObjectMeta.GenerateName)
+		slog.Info("received mutation request", "namespace", pod.Namespace, "pod", pod.ObjectMeta.GenerateName)
 		// set response options
 		resp.Allowed = true
 		resp.UID = ar.UID
@@ -162,7 +163,7 @@ func actuallyMutate(body []byte) ([]byte, error) {
 			for _, reg := range config.RegistryList() {
 				if newImage, ok := rewriteImage(image, reg); ok {
 					p = append(p, map[string]string{"op": "replace", "path": path, "value": newImage})
-					log.Printf("Created patch for image %s on pod %s:%s, with %s", image, pod.Namespace, pod.ObjectMeta.GenerateName, newImage)
+					slog.Info("patched image", "namespace", pod.Namespace, "pod", pod.ObjectMeta.GenerateName, "original", image, "new", newImage)
 					return
 				}
 			}
@@ -197,17 +198,20 @@ func actuallyMutate(body []byte) ([]byte, error) {
 		if err != nil {
 			return nil, err // untested section
 		}
-		log.Printf("Successfully mutated pod %s:%s", pod.Namespace, pod.ObjectMeta.Name)
+		slog.Info("mutation complete", "namespace", pod.Namespace, "pod", pod.ObjectMeta.Name)
 	}
 
 	return responseBody, nil
 }
 
 func main() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+
 	var err error
 	config, err = ReadConf("/etc/ecr-pull-through/registries.yaml")
 	if err != nil {
-		log.Fatalf("Failed to read config: %v", err)
+		slog.Error("failed to read config", "error", err)
+		os.Exit(1)
 	}
 	initGlobals(config)
 
@@ -231,7 +235,7 @@ func main() {
 	_, keyErr := os.Stat(keyPath)
 
 	if os.IsNotExist(certErr) || os.IsNotExist(keyErr) {
-		log.Println("Starting server without TLS...")
+		slog.Info("starting server without TLS")
 		log.Fatal(s.ListenAndServe())
 	} else {
 		reloader := &CertReloader{certPath: certPath, keyPath: keyPath}
@@ -239,7 +243,7 @@ func main() {
 			GetCertificate: reloader.GetCertificate,
 			MinVersion:     tls.VersionTLS12,
 		}
-		log.Println("Starting server with dynamic TLS reloading...")
+		slog.Info("starting server with dynamic TLS reloading")
 		log.Fatal(s.ListenAndServeTLS("", ""))
 	}
 }
