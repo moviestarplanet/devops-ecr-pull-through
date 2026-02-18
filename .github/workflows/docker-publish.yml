@@ -19,7 +19,7 @@ env:
 
 jobs:
   prepare-build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
 
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -90,12 +90,6 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Extract platform architecture
-      run: |
-        echo "PLATFORM_ARCH=${platform##*/}" >> $GITHUB_ENV
-      env:
-        platform: ${{ matrix.platform }}
-
     - name: Setup Docker Buildx
       uses: docker/setup-buildx-action@v3
       with:
@@ -107,10 +101,10 @@ jobs:
       with:
         images: ${{ env.REGISTRY }}/${{ needs.prepare-build.outputs.name_lower }}
         tags: |
-          type=raw,value=${{ needs.prepare-build.outputs.version }}-${{ env.PLATFORM_ARCH }}
+          type=raw,value=${{ needs.prepare-build.outputs.version }}-${{ matrix.platform }}
         labels: |
           org.opencontainers.image.title=ECR Pull-Through Cache Mutation Webhook
-          org.opencontainers.image.description=${{ env.IMAGE_DESCRIPTION }} (${{ env.PLATFORM_ARCH }})
+          org.opencontainers.image.description=${{ env.IMAGE_DESCRIPTION }} (${{ matrix.platform }})
           org.opencontainers.image.version=${{ needs.prepare-build.outputs.version }}
           org.opencontainers.image.vendor=MovieStarPlanet
           org.opencontainers.image.licenses=MIT
@@ -182,6 +176,18 @@ jobs:
     - name: Inspect multiarch manifest
       run: |
         docker buildx imagetools inspect '${{ env.REGISTRY }}/${{ needs.prepare-build.outputs.name_lower }}:${{ needs.prepare-build.outputs.version }}'
+
+    - name: Checkout repository
+      uses: actions/checkout@v6
+
+    - name: Push Helm chart as OCI artifact
+      run: |
+        helm package charts/ecr-pull-through \
+          --version '${{ needs.prepare-build.outputs.version }}' \
+          --app-version '${{ needs.prepare-build.outputs.version }}'
+        ORG=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+        helm push ecr-pull-through-${{ needs.prepare-build.outputs.version }}.tgz \
+          oci://${{ env.REGISTRY }}/${ORG}/charts
 
   publish-github-release:
     needs:
