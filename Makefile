@@ -20,4 +20,4 @@ kind-create:
 
 # docker-build: build the docker image
 docker-build:
-	docker build -t ghcr.io/maxtacu/ecr-pull-through:$(COMMIT_SHA) .
+	docker buildx build -t ecr-pull-through:latest .
