@@ -170,9 +170,14 @@ jobs:
       run: |
         docker buildx imagetools create \
           $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+          --annotation='index:org.opencontainers.image.title=ECR Pull-Through Cache Mutation Webhook' \
           --annotation='index:org.opencontainers.image.description=${{ env.IMAGE_DESCRIPTION }}' \
-          --annotation='index:org.opencontainers.image.source=https://github.com/${{ github.repository }}' \
+          --annotation='index:org.opencontainers.image.version=${{ needs.prepare-build.outputs.version }}' \
+          --annotation='index:org.opencontainers.image.vendor=MovieStarPlanet' \
           --annotation='index:org.opencontainers.image.licenses=MIT' \
+          --annotation='index:org.opencontainers.image.source=https://github.com/${{ github.repository }}' \
+          --annotation='index:org.opencontainers.image.url=https://github.com/${{ github.repository }}' \
+          --annotation='index:org.opencontainers.image.revision=${{ github.sha }}' \
           ${{ env.REGISTRY }}/${{ needs.prepare-build.outputs.name_lower }}:${{ needs.prepare-build.outputs.version }}-amd64 \
           ${{ env.REGISTRY }}/${{ needs.prepare-build.outputs.name_lower }}:${{ needs.prepare-build.outputs.version }}-arm64
 

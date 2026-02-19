@@ -1,17 +1,16 @@
-FROM golang:1.25-alpine
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS build
 
 WORKDIR /app
 
 COPY go.mod go.sum ./
 COPY cmd/ cmd/
 
-ARG TARGETOS=linux
-ARG TARGETARCH=amd64
+ARG TARGETOS TARGETARCH
 
-RUN CGO_ENABLED=0 GOARCH=${TARGETARCH} GOOS=${TARGETOS} go build -o bin/mutation-webhook cmd/*.go
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o bin/mutation-webhook cmd/*.go
 
 FROM gcr.io/distroless/base-debian13:nonroot
 
-COPY --from=0 /app/bin/mutation-webhook /
+COPY --from=build /app/bin/mutation-webhook /
 
 ENTRYPOINT [ "/mutation-webhook" ]
