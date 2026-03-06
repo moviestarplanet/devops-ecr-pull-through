@@ -19,6 +19,8 @@ registries: []
 # Only pods in namespaces with the specified labels will be processed by the webhook.
 # By default, the webhook only processes pods in namespaces labeled with 'pull-through-enabled: "true"'
 WebhookNamespaceSelector: {}
+
+webhookFailurePolicy: Ignore
 #  matchLabels:
 #    pull-through-enabled: "true"
 
