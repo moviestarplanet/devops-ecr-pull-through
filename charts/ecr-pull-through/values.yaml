@@ -4,6 +4,8 @@
 
 # This will set the replicaset count more information can be found here: https://kubernetes.io/docs/concepts/workloads/controllers/replicaset/
 replicaCount: 2
+revisionHistoryLimit: 3
+terminationGracePeriodSeconds: 30
 
 awsRegion: ""
 awsAccountId: ""
