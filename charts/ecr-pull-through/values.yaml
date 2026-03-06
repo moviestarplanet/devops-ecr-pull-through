@@ -104,6 +104,9 @@ autoscaling:
   targetCPUUtilizationPercentage: 80
   targetMemoryUtilizationPercentage: 80
 
+# podDisruptionBudget:
+#   minAvailable: 1
+
 nodeSelector:
   kubernetes.io/os: linux
 
