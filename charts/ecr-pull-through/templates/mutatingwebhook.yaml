@@ -24,5 +24,6 @@ webhooks:
     namespaceSelector:
       {{- toYaml . | nindent 6 }}
     {{- end }}
+    failurePolicy: {{ .Values.webhookFailurePolicy }}
     sideEffects: None
     admissionReviewVersions: ["v1"]
