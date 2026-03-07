@@ -45,8 +45,8 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           lifecycle:
             preStop:
-              exec:
-                command: ["sleep", "5"]
+              sleep:
+                seconds: 5
           ports:
             - name: https
               containerPort: 8443
