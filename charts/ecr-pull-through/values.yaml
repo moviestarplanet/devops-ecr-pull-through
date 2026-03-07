@@ -20,7 +20,7 @@ registries: []
 # WebhookNamespaceSelector defines which namespaces the webhook will operate in.
 # Only pods in namespaces with the specified labels will be processed by the webhook.
 # By default, the webhook only processes pods in namespaces labeled with 'pull-through-enabled: "true"'
-WebhookNamespaceSelector: {}
+webhookNamespaceSelector: {}
 
 webhookFailurePolicy: Ignore
 #  matchLabels:
@@ -91,12 +91,18 @@ resources:
 # This is to setup the liveness and readiness probes more information can be found here: https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
 livenessProbe:
   httpGet:
-    path: /
+    path: /health
     port: https
+    scheme: HTTPS
+  initialDelaySeconds: 5
+  periodSeconds: 10
 readinessProbe:
   httpGet:
-    path: /
+    path: /ready
     port: https
+    scheme: HTTPS
+  initialDelaySeconds: 5
+  periodSeconds: 10
 
 # This section is for setting up autoscaling more information can be found here: https://kubernetes.io/docs/concepts/workloads/autoscaling/
 autoscaling:

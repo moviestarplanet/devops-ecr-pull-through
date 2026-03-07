@@ -48,7 +48,8 @@ spec:
               exec:
                 command: ["sleep", "5"]
           ports:
-            - containerPort: 8443
+            - name: https
+              containerPort: 8443
               protocol: TCP
           {{- with .Values.livenessProbe }}
           livenessProbe:
@@ -58,20 +59,10 @@ spec:
           readinessProbe:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 8443
-              scheme: HTTPS
-            initialDelaySeconds: 5
-            periodSeconds: 10
-          readinessProbe:
-            httpGet:
-              path: /ready
-              port: 8443
-              scheme: HTTPS
-            initialDelaySeconds: 5
-            periodSeconds: 10
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           env:
             - name: ECR_AWS_ACCOUNT_ID
               value: {{ required "awsAccountId is required" .Values.awsAccountId | quote }}

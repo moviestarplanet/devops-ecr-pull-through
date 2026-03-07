@@ -20,7 +20,7 @@ webhooks:
         resources: ["pods"]
         operations: ["CREATE", "UPDATE"]
         scope: Namespaced
-    {{- with .Values.WebhookNamespaceSelector }}
+    {{- with .Values.webhookNamespaceSelector }}
     namespaceSelector:
       {{- toYaml . | nindent 6 }}
     {{- end }}
